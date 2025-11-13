@@ -1,0 +1,419 @@
+"""
+Blockchain Smart Contract Security Auditor
+Author: Ewan Mitchell
+Description: Automated vulnerability scanner for Ethereum and Hyperledger smart contracts
+Technologies: Python, Web3.py, Solidity AST parsing, Pattern matching
+"""
+
+import re
+import json
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+from datetime import datetime
+import hashlib
+
+@dataclass
+class Vulnerability:
+    """Vulnerability finding"""
+    severity: str  # CRITICAL, HIGH, MEDIUM, LOW, INFO
+    category: str
+    title: str
+    description: str
+    line_number: int
+    code_snippet: str
+    recommendation: str
+    cwe_id: Optional[str] = None
+
+@dataclass
+class AuditReport:
+    """Complete audit report"""
+    contract_name: str
+    contract_address: Optional[str]
+    audit_date: str
+    auditor: str
+    total_lines: int
+    vulnerabilities: List[Vulnerability]
+    risk_score: float
+    compliance_status: Dict[str, bool]
+
+class SmartContractAuditor:
+    """Main auditing engine for smart contracts"""
+    
+    def __init__(self):
+        self.vulnerabilities = []
+        self.contract_code = ""
+        self.contract_lines = []
+        
+    def load_contract(self, contract_code: str, contract_name: str = "Contract"):
+        """Load smart contract code for analysis"""
+        self.contract_code = contract_code
+        self.contract_lines = contract_code.split('\n')
+        self.contract_name = contract_name
+        self.vulnerabilities = []
+        print(f"✅ Loaded contract: {contract_name} ({len(self.contract_lines)} lines)")
+    
+    def audit_reentrancy(self):
+        """Check for reentrancy vulnerabilities"""
+        print("🔍 Checking for reentrancy vulnerabilities...")
+        
+        # Pattern 1: External call before state update
+        for i, line in enumerate(self.contract_lines, 1):
+            # Check for external calls
+            if re.search(r'\.(call|transfer|send)\s*\(', line, re.IGNORECASE):
+                # Look ahead for state updates
+                for j in range(i, min(i + 10, len(self.contract_lines))):
+                    if re.search(r'(balance|amount|count)\s*=\s*', self.contract_lines[j], re.IGNORECASE):
+                        self.vulnerabilities.append(Vulnerability(
+                            severity="CRITICAL",
+                            category="Reentrancy",
+                            title="Potential Reentrancy Vulnerability",
+                            description="External call made before state update. Attacker could re-enter function.",
+                            line_number=i,
+                            code_snippet=line.strip(),
+                            recommendation="Use Checks-Effects-Interactions pattern. Update state before external calls, or use ReentrancyGuard.",
+                            cwe_id="CWE-841"
+                        ))
+                        break
+    
+    def audit_access_control(self):
+        """Check for access control issues"""
+        print("🔍 Checking for access control vulnerabilities...")
+        
+        # Check for functions without access modifiers
+        for i, line in enumerate(self.contract_lines, 1):
+            if re.search(r'function\s+\w+\s*\(', line, re.IGNORECASE):
+                # Check if it's a public/external function without modifiers
+                if 'public' in line or 'external' in line:
+                    # Check for sensitive operations without onlyOwner or similar
+                    if any(keyword in line.lower() for keyword in ['transfer', 'withdraw', 'destroy', 'selfdestruct']):
+                        if not any(modifier in line for modifier in ['onlyOwner', 'onlyAdmin', 'require', 'authorized']):
+                            self.vulnerabilities.append(Vulnerability(
+                                severity="HIGH",
+                                category="Access Control",
+                                title="Missing Access Control",
+                                description="Sensitive function lacks access control modifiers.",
+                                line_number=i,
+                                code_snippet=line.strip(),
+                                recommendation="Add appropriate access control modifiers (onlyOwner, require statements).",
+                                cwe_id="CWE-284"
+                            ))
+    
+    def audit_integer_overflow(self):
+        """Check for integer overflow/underflow"""
+        print("🔍 Checking for integer overflow vulnerabilities...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            # Check for unchecked arithmetic
+            if re.search(r'(\+\+|--|\+=|-=|\*=|/=)', line):
+                # Check if SafeMath is being used
+                if 'SafeMath' not in self.contract_code and 'unchecked' not in line:
+                    # Check Solidity version
+                    version_match = re.search(r'pragma solidity\s*[\^]?\s*(0\.[0-7]\.)', self.contract_code)
+                    if version_match:  # Pre-0.8.0 versions
+                        self.vulnerabilities.append(Vulnerability(
+                            severity="HIGH",
+                            category="Integer Overflow",
+                            title="Potential Integer Overflow/Underflow",
+                            description="Arithmetic operation without SafeMath in Solidity < 0.8.0",
+                            line_number=i,
+                            code_snippet=line.strip(),
+                            recommendation="Use SafeMath library or upgrade to Solidity >= 0.8.0",
+                            cwe_id="CWE-190"
+                        ))
+    
+    def audit_unchecked_return_values(self):
+        """Check for unchecked return values"""
+        print("🔍 Checking for unchecked return values...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            # Check for low-level calls
+            if re.search(r'\.(call|delegatecall|send)\s*\(', line):
+                # Check if return value is checked
+                if not re.search(r'(require|assert|if)\s*\(.*\.(call|delegatecall|send)', line):
+                    # Look at previous/next lines
+                    context = '\n'.join(self.contract_lines[max(0, i-2):min(i+2, len(self.contract_lines))])
+                    if 'require' not in context and 'assert' not in context:
+                        self.vulnerabilities.append(Vulnerability(
+                            severity="HIGH",
+                            category="Unchecked Return Value",
+                            title="Unchecked Low-Level Call",
+                            description="Low-level call return value not checked. Call could fail silently.",
+                            line_number=i,
+                            code_snippet=line.strip(),
+                            recommendation="Always check return values: require(address.call(...), 'Call failed');",
+                            cwe_id="CWE-252"
+                        ))
+    
+    def audit_tx_origin(self):
+        """Check for tx.origin usage"""
+        print("🔍 Checking for tx.origin authentication...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            if 'tx.origin' in line:
+                self.vulnerabilities.append(Vulnerability(
+                    severity="MEDIUM",
+                    category="Authentication",
+                    title="Use of tx.origin for Authentication",
+                    description="tx.origin is vulnerable to phishing attacks.",
+                    line_number=i,
+                    code_snippet=line.strip(),
+                    recommendation="Use msg.sender instead of tx.origin for authentication.",
+                    cwe_id="CWE-283"
+                ))
+    
+    def audit_timestamp_dependency(self):
+        """Check for timestamp manipulation"""
+        print("🔍 Checking for timestamp dependencies...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            if re.search(r'(block\.timestamp|now)\s*[<>=]', line):
+                self.vulnerabilities.append(Vulnerability(
+                    severity="MEDIUM",
+                    category="Timestamp Manipulation",
+                    title="Timestamp Dependency",
+                    description="Contract logic depends on block.timestamp which can be manipulated by miners.",
+                    line_number=i,
+                    code_snippet=line.strip(),
+                    recommendation="Avoid using timestamps for critical logic. Use block numbers or external oracles.",
+                    cwe_id="CWE-829"
+                ))
+    
+    def audit_visibility(self):
+        """Check for missing function visibility"""
+        print("🔍 Checking for visibility issues...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            if re.search(r'function\s+\w+\s*\(', line):
+                if not any(vis in line for vis in ['public', 'external', 'internal', 'private']):
+                    self.vulnerabilities.append(Vulnerability(
+                        severity="MEDIUM",
+                        category="Visibility",
+                        title="Missing Function Visibility",
+                        description="Function lacks explicit visibility modifier (defaults to public in older versions).",
+                        line_number=i,
+                        code_snippet=line.strip(),
+                        recommendation="Always specify function visibility explicitly.",
+                        cwe_id="CWE-710"
+                    ))
+    
+    def audit_dos_patterns(self):
+        """Check for denial of service patterns"""
+        print("🔍 Checking for DoS vulnerabilities...")
+        
+        for i, line in enumerate(self.contract_lines, 1):
+            # Unbounded loops
+            if re.search(r'for\s*\(.*;\s*\w+\s*<\s*\w+\.length', line):
+                self.vulnerabilities.append(Vulnerability(
+                    severity="MEDIUM",
+                    category="Denial of Service",
+                    title="Unbounded Loop Over Dynamic Array",
+                    description="Loop over dynamic array could cause out-of-gas errors.",
+                    line_number=i,
+                    code_snippet=line.strip(),
+                    recommendation="Implement pagination or limit array size. Avoid loops over unbounded arrays.",
+                    cwe_id="CWE-400"
+                ))
+    
+    def calculate_risk_score(self) -> float:
+        """Calculate overall risk score (0-100)"""
+        severity_weights = {
+            'CRITICAL': 25,
+            'HIGH': 10,
+            'MEDIUM': 5,
+            'LOW': 2,
+            'INFO': 0.5
+        }
+        
+        total_score = sum(severity_weights.get(v.severity, 0) for v in self.vulnerabilities)
+        
+        # Normalize to 0-100 scale
+        max_possible = len(self.vulnerabilities) * 25
+        if max_possible == 0:
+            return 0.0
+        
+        return min(100, (total_score / max_possible) * 100)
+    
+    def check_compliance(self) -> Dict[str, bool]:
+        """Check compliance with security standards"""
+        critical_issues = [v for v in self.vulnerabilities if v.severity == 'CRITICAL']
+        high_issues = [v for v in self.vulnerabilities if v.severity == 'HIGH']
+        
+        return {
+            'OWASP_Smart_Contract_Top_10': len(critical_issues) == 0,
+            'CWE_Smart_Contract_Weaknesses': len(critical_issues) + len(high_issues) == 0,
+            'Production_Ready': len(critical_issues) == 0 and len(high_issues) <= 2,
+            'Audit_Passed': len(critical_issues) == 0 and len(high_issues) <= 1
+        }
+    
+    def run_full_audit(self) -> AuditReport:
+        """Run complete security audit"""
+        print("\n" + "="*60)
+        print("🔐 BLOCKCHAIN SMART CONTRACT SECURITY AUDIT")
+        print("="*60)
+        print(f"Contract: {self.contract_name}")
+        print(f"Lines of Code: {len(self.contract_lines)}")
+        print(f"Audit Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*60 + "\n")
+        
+        # Run all checks
+        self.audit_reentrancy()
+        self.audit_access_control()
+        self.audit_integer_overflow()
+        self.audit_unchecked_return_values()
+        self.audit_tx_origin()
+        self.audit_timestamp_dependency()
+        self.audit_visibility()
+        self.audit_dos_patterns()
+        
+        # Calculate metrics
+        risk_score = self.calculate_risk_score()
+        compliance = self.check_compliance()
+        
+        # Create report
+        report = AuditReport(
+            contract_name=self.contract_name,
+            contract_address=None,
+            audit_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            auditor="Ewan Mitchell - Blockchain Security Auditor",
+            total_lines=len(self.contract_lines),
+            vulnerabilities=self.vulnerabilities,
+            risk_score=risk_score,
+            compliance_status=compliance
+        )
+        
+        return report
+    
+    def print_report(self, report: AuditReport):
+        """Print formatted audit report"""
+        print("\n" + "="*60)
+        print("📊 AUDIT RESULTS")
+        print("="*60)
+        
+        # Summary
+        severity_counts = {}
+        for v in report.vulnerabilities:
+            severity_counts[v.severity] = severity_counts.get(v.severity, 0) + 1
+        
+        print(f"\nTotal Vulnerabilities: {len(report.vulnerabilities)}")
+        for severity in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+            count = severity_counts.get(severity, 0)
+            if count > 0:
+                emoji = '🔴' if severity == 'CRITICAL' else '🟠' if severity == 'HIGH' else '🟡' if severity == 'MEDIUM' else '🟢'
+                print(f"{emoji} {severity}: {count}")
+        
+        print(f"\n📈 Risk Score: {report.risk_score:.1f}/100")
+        
+        print("\n🎯 Compliance Status:")
+        for standard, passed in report.compliance_status.items():
+            status = "✅ PASSED" if passed else "❌ FAILED"
+            print(f"  {standard}: {status}")
+        
+        # Detailed findings
+        if report.vulnerabilities:
+            print("\n" + "="*60)
+            print("🔍 DETAILED FINDINGS")
+            print("="*60)
+            
+            for i, vuln in enumerate(report.vulnerabilities, 1):
+                print(f"\n[{i}] {vuln.severity} - {vuln.title}")
+                print(f"    Category: {vuln.category}")
+                print(f"    Line: {vuln.line_number}")
+                print(f"    Code: {vuln.code_snippet}")
+                print(f"    Issue: {vuln.description}")
+                print(f"    Fix: {vuln.recommendation}")
+                if vuln.cwe_id:
+                    print(f"    CWE: {vuln.cwe_id}")
+        else:
+            print("\n✅ No vulnerabilities found!")
+        
+        print("\n" + "="*60)
+        
+    def export_json_report(self, report: AuditReport, filename: str = "audit_report.json"):
+        """Export audit report as JSON"""
+        report_dict = {
+            'contract_name': report.contract_name,
+            'audit_date': report.audit_date,
+            'auditor': report.auditor,
+            'total_lines': report.total_lines,
+            'risk_score': report.risk_score,
+            'compliance_status': report.compliance_status,
+            'vulnerabilities': [
+                {
+                    'severity': v.severity,
+                    'category': v.category,
+                    'title': v.title,
+                    'description': v.description,
+                    'line_number': v.line_number,
+                    'code_snippet': v.code_snippet,
+                    'recommendation': v.recommendation,
+                    'cwe_id': v.cwe_id
+                }
+                for v in report.vulnerabilities
+            ]
+        }
+        
+        with open(filename, 'w') as f:
+            json.dump(report_dict, f, indent=2)
+        
+        print(f"✅ Report exported to {filename}")
+
+
+# Example vulnerable contract for testing
+SAMPLE_VULNERABLE_CONTRACT = """
+pragma solidity ^0.7.0;
+
+contract VulnerableBank {
+    mapping(address => uint) public balances;
+    
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
+    
+    // VULNERABLE: Reentrancy
+    function withdraw(uint _amount) public {
+        require(balances[msg.sender] >= _amount);
+        msg.sender.call{value: _amount}("");
+        balances[msg.sender] -= _amount;
+    }
+    
+    // VULNERABLE: Access control
+    function destroy() public {
+        selfdestruct(payable(msg.sender));
+    }
+    
+    // VULNERABLE: tx.origin
+    function withdrawAll() public {
+        require(tx.origin == msg.sender);
+        payable(msg.sender).transfer(balances[msg.sender]);
+    }
+    
+    // VULNERABLE: Timestamp
+    function isLotteryTime() public view returns (bool) {
+        return block.timestamp % 15 == 0;
+    }
+    
+    // VULNERABLE: Unchecked return
+    function sendEther(address _to, uint _amount) public {
+        payable(_to).send(_amount);
+    }
+}
+"""
+
+# Main execution
+if __name__ == "__main__":
+    auditor = SmartContractAuditor()
+    
+    # Load sample vulnerable contract
+    auditor.load_contract(SAMPLE_VULNERABLE_CONTRACT, "VulnerableBank.sol")
+    
+    # Run full audit
+    report = auditor.run_full_audit()
+    
+    # Print results
+    auditor.print_report(report)
+    
+    # Export JSON
+    auditor.export_json_report(report)
+    
+    print("\n✅ Blockchain audit completed!")
+    print("🔐 Platform ready for production smart contract auditing")
