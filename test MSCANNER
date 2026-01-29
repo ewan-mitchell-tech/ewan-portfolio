@@ -1,2 +1,2 @@
-git clone https://github.com/ICWR-TEAM/MScanner/
-cd MScanner
+git clone https://github.com/ICWR-TEAM/MScanner/cd MScanner
+python scan.py -t <target_directory>
